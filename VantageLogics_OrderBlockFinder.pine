@@ -1,0 +1,690 @@
+//@version=5
+// =============================================================================
+// VANTAGELOGICS.AI ORDER BLOCK FINDER v1.1.0
+// Institutional-Grade Smart Money Concepts (SMC) Indicator
+// =============================================================================
+// Version: 1.1.0
+// Last Updated: 2026-01-09
+// Author: VantageLogics.ai
+// License: Free - Methodology Demonstration
+// Changelog: Added Multi-Timeframe (MTF) support for higher TF OBs on lower charts
+// =============================================================================
+
+indicator(title='VantageLogics.ai Order Block Finder', shorttitle='VL OB Finder', overlay=true, max_lines_count=500, max_labels_count=200, max_boxes_count=100)
+
+// =============================================================================
+// BRAND COLOR PALETTE (NON-NEGOTIABLE)
+// =============================================================================
+color COLOR_VOID_BLACK = #050507    // Void Black: Primary background fill
+color COLOR_PURE_WHITE = #FFFFFF    // Pure White: Primary lines, labels, standard icons
+color COLOR_VANTAGE_GOLD = #FCD34D  // Vantage Gold: EXCLUSIVE for highest-conviction signals
+
+// =============================================================================
+// USER INPUTS FOR "TUNNEL FOCUS" CUSTOMIZATION
+// =============================================================================
+showRecentOBs = input.int(defval=2, title="Show Recent Order Blocks", minval=1, maxval=10,
+     tooltip="Aggressive de-cluttering: Default shows only the 2 most recent OBs")
+obLookback = input.int(defval=100, title="Order Block Lookback Period", minval=20, maxval=500)
+minOBStrength = input.float(defval=1.5, title="Minimum OB Strength Ratio", minval=1.0, maxval=3.0, step=0.1,
+     tooltip="Higher values = stronger, more reliable Order Blocks")
+
+showTriggerCandles = input.bool(defval=true, title="Show Trigger Candles")
+showOBBoxes = input.bool(defval=true, title="Show Order Block Boxes")
+showLabels = input.bool(defval=true, title="Show Information Labels")
+showMitigated = input.bool(defval=true, title="Show Mitigated Order Blocks",
+     tooltip="Display OBs that have been revisited by price (mitigated)")
+showStatsPanel = input.bool(defval=true, title="Show Statistics Panel",
+     tooltip="Display OB count and A+ signal statistics")
+
+// =============================================================================
+// MULTI-TIMEFRAME (MTF) SETTINGS
+// =============================================================================
+mtfEnabled = input.bool(defval=false, title="Enable Higher Timeframe OBs", group="Multi-Timeframe", tooltip="Show Order Blocks from a higher timeframe on current chart")
+mtfTimeframe = input.timeframe(defval="D", title="Higher Timeframe", group="Multi-Timeframe", tooltip="Select the higher timeframe to pull Order Blocks from")
+mtfShowCount = input.int(defval=2, title="HTF Order Blocks to Show", minval=1, maxval=5, group="Multi-Timeframe")
+color COLOR_MTF_BULL = input.color(defval=#00BFFF, title="HTF Bullish OB Color", group="Multi-Timeframe")
+color COLOR_MTF_BEAR = input.color(defval=#FF6B6B, title="HTF Bearish OB Color", group="Multi-Timeframe")
+
+// =============================================================================
+// CONSTANTS FOR CONSISTENCY
+// =============================================================================
+float EPSILON = 1e-10  // Standardized division-by-zero protection
+int ATR_PERIOD = 14
+float OB_SIZE_MULTIPLIER = 2.5
+float PREMIUM_THRESHOLD = 1.6  // Adjusted for ~15-20% A+ signal frequency
+float GRADE_A_THRESHOLD = 1.4  // Adjusted proportionally
+float GRADE_B_THRESHOLD = 1.2  // Adjusted proportionally
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+// Safe division to prevent division by zero
+safeDivide(float numerator, float denominator) =>
+    denominator == 0 ? 0.0 : numerator / math.max(math.abs(denominator), EPSILON)
+
+// Calculate candle range safely
+getCandleRange(float highVal, float lowVal) =>
+    math.max(highVal - lowVal, EPSILON)
+
+// Get close position within candle (0 = low, 1 = high)
+getClosePosition(float closeVal, float highVal, float lowVal) =>
+    candleRange = getCandleRange(highVal, lowVal)
+    safeDivide(closeVal - lowVal, candleRange)
+
+// Determine strength grade string
+getStrengthGrade(float strength) =>
+    strength >= PREMIUM_THRESHOLD ? "A+" : strength >= GRADE_A_THRESHOLD ? "A" : strength >= GRADE_B_THRESHOLD ? "B" : "C"
+
+// Check if strength qualifies as premium (A+)
+isPremiumStrength(float strength) =>
+    strength >= PREMIUM_THRESHOLD
+
+// =============================================================================
+// ORDER BLOCK DETECTION LOGIC (NON-REPAINTING) - SMC METHODOLOGY
+// =============================================================================
+// Function to detect bullish Order Blocks (SMC Definition)
+detectBullishOB(float openPrev, float highPrev, float lowPrev, float closePrev, float openCurr, float highCurr, float lowCurr, float closeCurr, float avgRange) =>
+    // SMC Bullish OB Definition:
+    // 1. Previous candle is BEARISH (close < open)
+    // 2. Current candle breaks ABOVE previous high (low > previous high)
+    // 3. Current candle closes STRONG (in upper 60% of range - close position >= 0.6)
+    // 4. Size validation: OB should not be too large relative to ATR
+
+    isBearishPrev = closePrev < openPrev
+    breaksAbove = lowCurr > highPrev
+    closePosition = getClosePosition(closeCurr, highCurr, lowCurr)
+    strongClose = closePosition >= 0.6  // Closes in upper 60% of range
+
+    obRange = getCandleRange(highPrev, lowPrev)
+    reasonableSize = obRange <= avgRange * OB_SIZE_MULTIPLIER
+
+    isBearishPrev and breaksAbove and strongClose and reasonableSize
+
+// Function to detect bearish Order Blocks (SMC Definition)
+detectBearishOB(float openPrev, float highPrev, float lowPrev, float closePrev, float openCurr, float highCurr, float lowCurr, float closeCurr, float avgRange) =>
+    // SMC Bearish OB Definition:
+    // 1. Previous candle is BULLISH (close > open)
+    // 2. Current candle breaks BELOW previous low (high < previous low)
+    // 3. Current candle closes STRONG (in lower 40% of range - close position <= 0.4)
+    // 4. Size validation: OB should not be too large relative to ATR
+
+    isBullishPrev = closePrev > openPrev
+    breaksBelow = highCurr < lowPrev
+    closePosition = getClosePosition(closeCurr, highCurr, lowCurr)
+    strongClose = closePosition <= 0.4  // Closes in lower 40% of range
+
+    obRange = getCandleRange(highPrev, lowPrev)
+    reasonableSize = obRange <= avgRange * OB_SIZE_MULTIPLIER
+
+    isBullishPrev and breaksBelow and strongClose and reasonableSize
+
+// Calculate OB strength ratio with multiple factors
+calculateOBStrength(float openPrev, float highPrev, float lowPrev, float closePrev, float openCurr, float highCurr, float lowCurr, float closeCurr) =>
+    // Factor 1: Size ratio (current range vs OB range)
+    obRange = getCandleRange(highPrev, lowPrev)
+    currRange = getCandleRange(highCurr, lowCurr)
+    sizeRatio = safeDivide(currRange, obRange)
+
+    // Factor 2: Break strength (how far beyond OB)
+    breakDistBull = lowCurr > highPrev ? lowCurr - highPrev : 0.0
+    breakDistBear = highCurr < lowPrev ? lowPrev - highCurr : 0.0
+    breakStrength = safeDivide(math.max(breakDistBull, breakDistBear), currRange)
+
+    // Factor 3: Close strength (how strong the close is)
+    closePosition = getClosePosition(closeCurr, highCurr, lowCurr)
+    closeStrength = closePosition > 0.5 ? closePosition : 1.0 - closePosition
+
+    // Combined strength score (weighted)
+    (sizeRatio * 0.4) + (breakStrength * 0.3) + (closeStrength * 0.3)
+
+// =============================================================================
+// MAIN EXECUTION LOGIC (NON-REPAINTING - barstate.isconfirmed)
+// =============================================================================
+// Persistent storage arrays
+var array<int> bullishOBIndices = array.new_int(0)
+var array<int> bearishOBIndices = array.new_int(0)
+var array<float> bullishOBHighs = array.new_float(0)
+var array<float> bullishOBLows = array.new_float(0)
+var array<float> bearishOBHighs = array.new_float(0)
+var array<float> bearishOBLows = array.new_float(0)
+var array<float> bullishOBStrengths = array.new_float(0)
+var array<float> bearishOBStrengths = array.new_float(0)
+var array<bool> bullishOBMitigated = array.new_bool(0)
+var array<bool> bearishOBMitigated = array.new_bool(0)
+
+// Premium signal counters for performance metrics
+var int premiumBullishCount = 0
+var int premiumBearishCount = 0
+
+// Visualization object storage for proper lifecycle management
+var array<box> activeBoxes = array.new_box(0)
+var array<label> activeLabels = array.new_label(0)
+var label ctaLabel = na
+
+// Cache ATR for performance
+float cachedATR = ta.atr(ATR_PERIOD)
+
+// =============================================================================
+// ORDER BLOCK DETECTION (on confirmed bars only)
+// =============================================================================
+if barstate.isconfirmed
+    // Check for bullish Order Block
+    bullishOBDetected = detectBullishOB(open[1], high[1], low[1], close[1], open, high, low, close, cachedATR)
+    if bullishOBDetected
+        obStrength = calculateOBStrength(open[1], high[1], low[1], close[1], open, high, low, close)
+
+        if obStrength >= minOBStrength
+            array.push(bullishOBIndices, bar_index[1])
+            array.push(bullishOBHighs, high[1])
+            array.push(bullishOBLows, low[1])
+            array.push(bullishOBStrengths, obStrength)
+            array.push(bullishOBMitigated, false)
+
+            if isPremiumStrength(obStrength)
+                premiumBullishCount += 1
+
+            // Maintain array size limit for performance
+            if array.size(bullishOBIndices) > obLookback
+                array.shift(bullishOBIndices)
+                array.shift(bullishOBHighs)
+                array.shift(bullishOBLows)
+                removedStrength = array.shift(bullishOBStrengths)
+                array.shift(bullishOBMitigated)
+                if isPremiumStrength(removedStrength)
+                    premiumBullishCount := math.max(0, premiumBullishCount - 1)
+
+    // Check for bearish Order Block
+    bearishOBDetected = detectBearishOB(open[1], high[1], low[1], close[1], open, high, low, close, cachedATR)
+    if bearishOBDetected
+        obStrength = calculateOBStrength(open[1], high[1], low[1], close[1], open, high, low, close)
+
+        if obStrength >= minOBStrength
+            array.push(bearishOBIndices, bar_index[1])
+            array.push(bearishOBHighs, high[1])
+            array.push(bearishOBLows, low[1])
+            array.push(bearishOBStrengths, obStrength)
+            array.push(bearishOBMitigated, false)
+
+            if isPremiumStrength(obStrength)
+                premiumBearishCount += 1
+
+            // Maintain array size limit for performance
+            if array.size(bearishOBIndices) > obLookback
+                array.shift(bearishOBIndices)
+                array.shift(bearishOBHighs)
+                array.shift(bearishOBLows)
+                removedStrength = array.shift(bearishOBStrengths)
+                array.shift(bearishOBMitigated)
+                if isPremiumStrength(removedStrength)
+                    premiumBearishCount := math.max(0, premiumBearishCount - 1)
+
+// =============================================================================
+// MULTI-TIMEFRAME ORDER BLOCK DETECTION
+// =============================================================================
+// Persistent storage for HTF Order Blocks
+var array<float> mtfBullHighs = array.new_float(0)
+var array<float> mtfBullLows = array.new_float(0)
+var array<float> mtfBullStrengths = array.new_float(0)
+var array<bool> mtfBullMitigated = array.new_bool(0)
+var array<float> mtfBearHighs = array.new_float(0)
+var array<float> mtfBearLows = array.new_float(0)
+var array<float> mtfBearStrengths = array.new_float(0)
+var array<bool> mtfBearMitigated = array.new_bool(0)
+
+// Request HTF data
+[htfOpen, htfHigh, htfLow, htfClose] = request.security(syminfo.tickerid, mtfTimeframe, [open, high, low, close], lookahead=barmerge.lookahead_off)
+[htfOpenPrev, htfHighPrev, htfLowPrev, htfClosePrev] = request.security(syminfo.tickerid, mtfTimeframe, [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_off)
+htfATR = request.security(syminfo.tickerid, mtfTimeframe, ta.atr(ATR_PERIOD), lookahead=barmerge.lookahead_off)
+htfBarConfirmed = request.security(syminfo.tickerid, mtfTimeframe, barstate.isconfirmed, lookahead=barmerge.lookahead_off)
+
+// Detect HTF Order Blocks when MTF is enabled
+if mtfEnabled and htfBarConfirmed and barstate.isconfirmed
+    // Check for HTF bullish Order Block
+    htfBullishOB = detectBullishOB(htfOpenPrev, htfHighPrev, htfLowPrev, htfClosePrev, htfOpen, htfHigh, htfLow, htfClose, htfATR)
+    if htfBullishOB
+        htfStrength = calculateOBStrength(htfOpenPrev, htfHighPrev, htfLowPrev, htfClosePrev, htfOpen, htfHigh, htfLow, htfClose)
+        if htfStrength >= minOBStrength
+            // Check if this OB already exists (avoid duplicates)
+            isDuplicate = false
+            mtfBullSize = array.size(mtfBullHighs)
+            if mtfBullSize > 0
+                lastHigh = array.get(mtfBullHighs, mtfBullSize - 1)
+                lastLow = array.get(mtfBullLows, mtfBullSize - 1)
+                if lastHigh == htfHighPrev and lastLow == htfLowPrev
+                    isDuplicate := true
+            if not isDuplicate
+                array.push(mtfBullHighs, htfHighPrev)
+                array.push(mtfBullLows, htfLowPrev)
+                array.push(mtfBullStrengths, htfStrength)
+                array.push(mtfBullMitigated, false)
+                // Maintain size limit
+                if array.size(mtfBullHighs) > 10
+                    array.shift(mtfBullHighs)
+                    array.shift(mtfBullLows)
+                    array.shift(mtfBullStrengths)
+                    array.shift(mtfBullMitigated)
+
+    // Check for HTF bearish Order Block
+    htfBearishOB = detectBearishOB(htfOpenPrev, htfHighPrev, htfLowPrev, htfClosePrev, htfOpen, htfHigh, htfLow, htfClose, htfATR)
+    if htfBearishOB
+        htfStrength = calculateOBStrength(htfOpenPrev, htfHighPrev, htfLowPrev, htfClosePrev, htfOpen, htfHigh, htfLow, htfClose)
+        if htfStrength >= minOBStrength
+            // Check if this OB already exists (avoid duplicates)
+            isDuplicate = false
+            mtfBearSize = array.size(mtfBearHighs)
+            if mtfBearSize > 0
+                lastHigh = array.get(mtfBearHighs, mtfBearSize - 1)
+                lastLow = array.get(mtfBearLows, mtfBearSize - 1)
+                if lastHigh == htfHighPrev and lastLow == htfLowPrev
+                    isDuplicate := true
+            if not isDuplicate
+                array.push(mtfBearHighs, htfHighPrev)
+                array.push(mtfBearLows, htfLowPrev)
+                array.push(mtfBearStrengths, htfStrength)
+                array.push(mtfBearMitigated, false)
+                // Maintain size limit
+                if array.size(mtfBearHighs) > 10
+                    array.shift(mtfBearHighs)
+                    array.shift(mtfBearLows)
+                    array.shift(mtfBearStrengths)
+                    array.shift(mtfBearMitigated)
+
+// Check MTF OB mitigation on current timeframe
+if mtfEnabled and barstate.isconfirmed
+    // Check MTF bullish OB mitigation
+    mtfBullMitSize = array.size(mtfBullHighs)
+    if mtfBullMitSize > 0
+        for i = 0 to mtfBullMitSize - 1
+            if not array.get(mtfBullMitigated, i)
+                obHigh = array.get(mtfBullHighs, i)
+                obLow = array.get(mtfBullLows, i)
+                if low <= obHigh and low >= obLow
+                    array.set(mtfBullMitigated, i, true)
+
+    // Check MTF bearish OB mitigation
+    mtfBearMitSize = array.size(mtfBearHighs)
+    if mtfBearMitSize > 0
+        for i = 0 to mtfBearMitSize - 1
+            if not array.get(mtfBearMitigated, i)
+                obHigh = array.get(mtfBearHighs, i)
+                obLow = array.get(mtfBearLows, i)
+                if high >= obLow and high <= obHigh
+                    array.set(mtfBearMitigated, i, true)
+
+// =============================================================================
+// ORDER BLOCK MITIGATION DETECTION
+// =============================================================================
+// Check if price has returned to (mitigated) any active Order Blocks
+if barstate.isconfirmed
+    // Check bullish OB mitigation (price drops back into OB zone)
+    bullishMitSize = array.size(bullishOBIndices)
+    if bullishMitSize > 0
+        for i = 0 to bullishMitSize - 1
+            if not array.get(bullishOBMitigated, i)
+                obHigh = array.get(bullishOBHighs, i)
+                obLow = array.get(bullishOBLows, i)
+                // Mitigation: price low enters the OB zone
+                if low <= obHigh and low >= obLow
+                    array.set(bullishOBMitigated, i, true)
+
+    // Check bearish OB mitigation (price rises back into OB zone)
+    bearishMitSize = array.size(bearishOBIndices)
+    if bearishMitSize > 0
+        for i = 0 to bearishMitSize - 1
+            if not array.get(bearishOBMitigated, i)
+                obHigh = array.get(bearishOBHighs, i)
+                obLow = array.get(bearishOBLows, i)
+                // Mitigation: price high enters the OB zone
+                if high >= obLow and high <= obHigh
+                    array.set(bearishOBMitigated, i, true)
+
+// =============================================================================
+// VISUALIZATION - BRAND-CONSCIOUS DESIGN (STRICT ADHERENCE)
+// =============================================================================
+// Clean up previous visualization objects to prevent resource exhaustion
+if barstate.islast
+    // Delete all existing boxes
+    boxCount = array.size(activeBoxes)
+    if boxCount > 0
+        for i = 0 to boxCount - 1
+            box.delete(array.get(activeBoxes, i))
+    array.clear(activeBoxes)
+
+    // Delete all existing labels
+    labelCount = array.size(activeLabels)
+    if labelCount > 0
+        for i = 0 to labelCount - 1
+            label.delete(array.get(activeLabels, i))
+    array.clear(activeLabels)
+
+    // Delete CTA label if exists
+    if not na(ctaLabel)
+        label.delete(ctaLabel)
+
+// =============================================================================
+// DRAW ORDER BLOCK BOXES
+// =============================================================================
+// Maximum lookback for drawing (TradingView limit is ~500 bars for bar_index based drawing)
+int MAX_DRAW_LOOKBACK = 500
+
+if barstate.islast and showOBBoxes
+    // Calculate how many OBs to show
+    bullishSize = array.size(bullishOBIndices)
+    bearishSize = array.size(bearishOBIndices)
+
+    bullishStartIdx = math.max(0, bullishSize - showRecentOBs)
+    bearishStartIdx = math.max(0, bearishSize - showRecentOBs)
+
+    // Draw bullish OB boxes
+    if bullishSize > 0
+        for i = bullishStartIdx to bullishSize - 1
+            idx = array.get(bullishOBIndices, i)
+
+            // Skip if OB is too far back to draw
+            if bar_index - idx > MAX_DRAW_LOOKBACK
+                continue
+
+            boxHigh = array.get(bullishOBHighs, i)
+            boxLow = array.get(bullishOBLows, i)
+            strength = array.get(bullishOBStrengths, i)
+            isMitigated = array.get(bullishOBMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            // Skip mitigated OBs if setting is off
+            if isMitigated and not showMitigated
+                continue
+
+            // Determine colors based on premium status and mitigation
+            boxFillColor = isMitigated ? color.new(COLOR_VOID_BLACK, 95) : (isPremium ? color.new(COLOR_VANTAGE_GOLD, 85) : color.new(COLOR_VOID_BLACK, 90))
+            borderColor = isMitigated ? color.new(COLOR_PURE_WHITE, 70) : (isPremium ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE)
+            borderWidth = isPremium and not isMitigated ? 2 : 1
+            borderStyle = isMitigated ? line.style_dashed : line.style_solid
+
+            // Create box extending to current bar
+            newBox = box.new(left=idx, top=boxHigh, right=bar_index+10, bottom=boxLow, border_color=borderColor, border_width=borderWidth, border_style=borderStyle, bgcolor=boxFillColor, extend=extend.none)
+            array.push(activeBoxes, newBox)
+
+    // Draw bearish OB boxes
+    if bearishSize > 0
+        for i = bearishStartIdx to bearishSize - 1
+            idx = array.get(bearishOBIndices, i)
+
+            // Skip if OB is too far back to draw
+            if bar_index - idx > MAX_DRAW_LOOKBACK
+                continue
+
+            boxHigh = array.get(bearishOBHighs, i)
+            boxLow = array.get(bearishOBLows, i)
+            strength = array.get(bearishOBStrengths, i)
+            isMitigated = array.get(bearishOBMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            // Skip mitigated OBs if setting is off
+            if isMitigated and not showMitigated
+                continue
+
+            // Determine colors based on premium status and mitigation
+            boxFillColor = isMitigated ? color.new(COLOR_VOID_BLACK, 95) : (isPremium ? color.new(COLOR_VANTAGE_GOLD, 85) : color.new(COLOR_VOID_BLACK, 90))
+            borderColor = isMitigated ? color.new(COLOR_PURE_WHITE, 70) : (isPremium ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE)
+            borderWidth = isPremium and not isMitigated ? 2 : 1
+            borderStyle = isMitigated ? line.style_dashed : line.style_solid
+
+            // Create box extending to current bar
+            newBox = box.new(left=idx, top=boxHigh, right=bar_index+10, bottom=boxLow, border_color=borderColor, border_width=borderWidth, border_style=borderStyle, bgcolor=boxFillColor, extend=extend.none)
+            array.push(activeBoxes, newBox)
+
+// =============================================================================
+// DRAW MULTI-TIMEFRAME ORDER BLOCK BOXES
+// =============================================================================
+if barstate.islast and mtfEnabled and showOBBoxes
+    // Draw MTF bullish OB boxes
+    mtfBullSize = array.size(mtfBullHighs)
+    mtfBullStart = math.max(0, mtfBullSize - mtfShowCount)
+    if mtfBullSize > 0
+        for i = mtfBullStart to mtfBullSize - 1
+            boxHigh = array.get(mtfBullHighs, i)
+            boxLow = array.get(mtfBullLows, i)
+            strength = array.get(mtfBullStrengths, i)
+            isMitigated = array.get(mtfBullMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            if isMitigated and not showMitigated
+                continue
+
+            // MTF boxes use distinct colors and thicker borders
+            boxFillColor = isMitigated ? color.new(COLOR_MTF_BULL, 95) : color.new(COLOR_MTF_BULL, 85)
+            borderColor = isMitigated ? color.new(COLOR_MTF_BULL, 70) : COLOR_MTF_BULL
+            borderWidth = isPremium ? 3 : 2
+            borderStyle = isMitigated ? line.style_dashed : line.style_solid
+
+            // MTF boxes extend from left edge of visible chart
+            newBox = box.new(left=bar_index-400, top=boxHigh, right=bar_index+20, bottom=boxLow, border_color=borderColor, border_width=borderWidth, border_style=borderStyle, bgcolor=boxFillColor, extend=extend.none)
+            array.push(activeBoxes, newBox)
+
+            // Add HTF label
+            grade = getStrengthGrade(strength)
+            mtfLabel = isMitigated ? "[" + mtfTimeframe + "] Bull [M]\n" + grade : "[" + mtfTimeframe + "] Bull OB\n" + grade
+            htfLabelColor = isMitigated ? color.new(COLOR_MTF_BULL, 50) : COLOR_MTF_BULL
+            htfInfoLabel = label.new(x=bar_index+21, y=(boxHigh+boxLow)/2, text=mtfLabel, style=label.style_label_left, color=color.new(COLOR_VOID_BLACK, 90), textcolor=htfLabelColor, size=size.small, textalign=text.align_left)
+            array.push(activeLabels, htfInfoLabel)
+
+    // Draw MTF bearish OB boxes
+    mtfBearSize = array.size(mtfBearHighs)
+    mtfBearStart = math.max(0, mtfBearSize - mtfShowCount)
+    if mtfBearSize > 0
+        for i = mtfBearStart to mtfBearSize - 1
+            boxHigh = array.get(mtfBearHighs, i)
+            boxLow = array.get(mtfBearLows, i)
+            strength = array.get(mtfBearStrengths, i)
+            isMitigated = array.get(mtfBearMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            if isMitigated and not showMitigated
+                continue
+
+            // MTF boxes use distinct colors and thicker borders
+            boxFillColor = isMitigated ? color.new(COLOR_MTF_BEAR, 95) : color.new(COLOR_MTF_BEAR, 85)
+            borderColor = isMitigated ? color.new(COLOR_MTF_BEAR, 70) : COLOR_MTF_BEAR
+            borderWidth = isPremium ? 3 : 2
+            borderStyle = isMitigated ? line.style_dashed : line.style_solid
+
+            // MTF boxes extend from left edge of visible chart
+            newBox = box.new(left=bar_index-400, top=boxHigh, right=bar_index+20, bottom=boxLow, border_color=borderColor, border_width=borderWidth, border_style=borderStyle, bgcolor=boxFillColor, extend=extend.none)
+            array.push(activeBoxes, newBox)
+
+            // Add HTF label
+            grade = getStrengthGrade(strength)
+            mtfLabel = isMitigated ? "[" + mtfTimeframe + "] Bear [M]\n" + grade : "[" + mtfTimeframe + "] Bear OB\n" + grade
+            htfLabelColor = isMitigated ? color.new(COLOR_MTF_BEAR, 50) : COLOR_MTF_BEAR
+            htfInfoLabel = label.new(x=bar_index+21, y=(boxHigh+boxLow)/2, text=mtfLabel, style=label.style_label_left, color=color.new(COLOR_VOID_BLACK, 90), textcolor=htfLabelColor, size=size.small, textalign=text.align_left)
+            array.push(activeLabels, htfInfoLabel)
+
+// =============================================================================
+// DRAW TRIGGER CANDLE MARKERS (Using labels instead of plotshape for dynamic control)
+// =============================================================================
+if barstate.islast and showTriggerCandles
+    bullishSize = array.size(bullishOBIndices)
+    bearishSize = array.size(bearishOBIndices)
+
+    bullishStartIdx = math.max(0, bullishSize - showRecentOBs)
+    bearishStartIdx = math.max(0, bearishSize - showRecentOBs)
+
+    // Draw bullish trigger markers (triangle up)
+    if bullishSize > 0
+        for i = bullishStartIdx to bullishSize - 1
+            idx = array.get(bullishOBIndices, i)
+
+            // Skip if OB is too far back to draw
+            if bar_index - idx > MAX_DRAW_LOOKBACK
+                continue
+
+            boxLow = array.get(bullishOBLows, i)
+            strength = array.get(bullishOBStrengths, i)
+            isMitigated = array.get(bullishOBMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            if isMitigated and not showMitigated
+                continue
+
+            markerColor = isMitigated ? color.new(COLOR_PURE_WHITE, 50) : (isPremium ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE)
+            markerText = isPremium ? "▲+" : "▲"
+            markerSize = isPremium ? size.normal : size.small
+
+            triggerLabel = label.new(x=idx, y=boxLow, text=markerText, style=label.style_label_up, color=color.new(COLOR_VOID_BLACK, 100), textcolor=markerColor, size=markerSize)
+            array.push(activeLabels, triggerLabel)
+
+    // Draw bearish trigger markers (triangle down)
+    if bearishSize > 0
+        for i = bearishStartIdx to bearishSize - 1
+            idx = array.get(bearishOBIndices, i)
+
+            // Skip if OB is too far back to draw
+            if bar_index - idx > MAX_DRAW_LOOKBACK
+                continue
+
+            boxHigh = array.get(bearishOBHighs, i)
+            strength = array.get(bearishOBStrengths, i)
+            isMitigated = array.get(bearishOBMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            if isMitigated and not showMitigated
+                continue
+
+            markerColor = isMitigated ? color.new(COLOR_PURE_WHITE, 50) : (isPremium ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE)
+            markerText = isPremium ? "▼+" : "▼"
+            markerSize = isPremium ? size.normal : size.small
+
+            triggerLabel = label.new(x=idx, y=boxHigh, text=markerText, style=label.style_label_down, color=color.new(COLOR_VOID_BLACK, 100), textcolor=markerColor, size=markerSize)
+            array.push(activeLabels, triggerLabel)
+
+// =============================================================================
+// DRAW INFORMATION LABELS
+// =============================================================================
+if barstate.islast and showLabels
+    bullishSize = array.size(bullishOBIndices)
+    bearishSize = array.size(bearishOBIndices)
+
+    bullishStartIdx = math.max(0, bullishSize - showRecentOBs)
+    bearishStartIdx = math.max(0, bearishSize - showRecentOBs)
+
+    // Draw bullish OB labels
+    if bullishSize > 0
+        for i = bullishStartIdx to bullishSize - 1
+            idx = array.get(bullishOBIndices, i)
+
+            // Skip if OB is too far back to draw
+            if bar_index - idx > MAX_DRAW_LOOKBACK
+                continue
+
+            boxHigh = array.get(bullishOBHighs, i)
+            boxLow = array.get(bullishOBLows, i)
+            strength = array.get(bullishOBStrengths, i)
+            isMitigated = array.get(bullishOBMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            if isMitigated and not showMitigated
+                continue
+
+            grade = getStrengthGrade(strength)
+            mitigatedText = isMitigated ? " [M]" : ""
+            labelText = "Bull OB" + mitigatedText + "\n" + grade + " | " + str.tostring(strength, "#.##")
+
+            labelBgColor = isMitigated ? color.new(COLOR_VOID_BLACK, 97) : (isPremium ? color.new(COLOR_VANTAGE_GOLD, 90) : color.new(COLOR_VOID_BLACK, 95))
+            textColor = isMitigated ? color.new(COLOR_PURE_WHITE, 50) : (isPremium ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE)
+
+            // Position label at right edge of box
+            infoLabel = label.new(x=bar_index+11, y=(boxHigh+boxLow)/2, text=labelText, style=label.style_label_left, color=labelBgColor, textcolor=textColor, size=size.small, textalign=text.align_left)
+            array.push(activeLabels, infoLabel)
+
+    // Draw bearish OB labels
+    if bearishSize > 0
+        for i = bearishStartIdx to bearishSize - 1
+            idx = array.get(bearishOBIndices, i)
+
+            // Skip if OB is too far back to draw
+            if bar_index - idx > MAX_DRAW_LOOKBACK
+                continue
+
+            boxHigh = array.get(bearishOBHighs, i)
+            boxLow = array.get(bearishOBLows, i)
+            strength = array.get(bearishOBStrengths, i)
+            isMitigated = array.get(bearishOBMitigated, i)
+            isPremium = isPremiumStrength(strength)
+
+            if isMitigated and not showMitigated
+                continue
+
+            grade = getStrengthGrade(strength)
+            mitigatedText = isMitigated ? " [M]" : ""
+            labelText = "Bear OB" + mitigatedText + "\n" + grade + " | " + str.tostring(strength, "#.##")
+
+            labelBgColor = isMitigated ? color.new(COLOR_VOID_BLACK, 97) : (isPremium ? color.new(COLOR_VANTAGE_GOLD, 90) : color.new(COLOR_VOID_BLACK, 95))
+            textColor = isMitigated ? color.new(COLOR_PURE_WHITE, 50) : (isPremium ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE)
+
+            // Position label at right edge of box
+            infoLabel = label.new(x=bar_index+11, y=(boxHigh+boxLow)/2, text=labelText, style=label.style_label_left, color=labelBgColor, textcolor=textColor, size=size.small, textalign=text.align_left)
+            array.push(activeLabels, infoLabel)
+
+// =============================================================================
+// STATISTICS PANEL
+// =============================================================================
+// Statistics panel shows OB counts and A+ signal percentage
+if barstate.islast and showStatsPanel
+    totalOBs = array.size(bullishOBIndices) + array.size(bearishOBIndices)
+    premiumTotal = premiumBullishCount + premiumBearishCount
+    premiumPercentage = totalOBs > 0 ? (float(premiumTotal) / float(totalOBs)) * 100.0 : 0.0
+    bullCount = array.size(bullishOBIndices)
+    bearCount = array.size(bearishOBIndices)
+
+    // Generate statistics text with timeframe info
+    tfDisplay = timeframe.period
+    statsText = "VantageLogics.ai | " + tfDisplay + "\n"
+    statsText := statsText + "Bull: " + str.tostring(bullCount) + " | Bear: " + str.tostring(bearCount) + "\n"
+    statsText := statsText + "A+ Signals: " + str.tostring(premiumTotal) + " (" + str.tostring(premiumPercentage, "#.#") + "%)"
+
+    // Determine styling based on premium percentage
+    isHighQuality = premiumPercentage >= 35.0
+    ctaBgColor = isHighQuality ? color.new(COLOR_VANTAGE_GOLD, 90) : color.new(COLOR_VOID_BLACK, 95)
+    ctaTextColor = isHighQuality ? COLOR_VANTAGE_GOLD : COLOR_PURE_WHITE
+    ctaSize = size.small
+
+    // Create the statistics label
+    ctaLabel := label.new(x=bar_index, y=low, text=statsText, style=label.style_label_upper_right, color=ctaBgColor, textcolor=ctaTextColor, size=ctaSize, textalign=text.align_right, tooltip="Order Block statistics for current lookback period")
+
+// =============================================================================
+// ALERTS FOR TRADINGVIEW SYSTEM
+// =============================================================================
+// Detect new OB on current confirmed bar
+bullishSize_alert = array.size(bullishOBIndices)
+bearishSize_alert = array.size(bearishOBIndices)
+hasBullishOBs = bullishSize_alert > 0
+hasBearishOBs = bearishSize_alert > 0
+lastBullishIdx = hasBullishOBs ? array.get(bullishOBIndices, bullishSize_alert - 1) : -1
+lastBearishIdx = hasBearishOBs ? array.get(bearishOBIndices, bearishSize_alert - 1) : -1
+newBullishOB = barstate.isconfirmed and hasBullishOBs and lastBullishIdx == bar_index[1]
+newBearishOB = barstate.isconfirmed and hasBearishOBs and lastBearishIdx == bar_index[1]
+
+// Get strength for alert message
+alertBullishStrength = newBullishOB ? array.get(bullishOBStrengths, array.size(bullishOBStrengths) - 1) : 0.0
+alertBearishStrength = newBearishOB ? array.get(bearishOBStrengths, array.size(bearishOBStrengths) - 1) : 0.0
+
+alertcondition(newBullishOB, title="New Bullish Order Block", message="Bullish Order Block detected")
+alertcondition(newBearishOB, title="New Bearish Order Block", message="Bearish Order Block detected")
+
+premiumBullishAlert = newBullishOB and isPremiumStrength(alertBullishStrength)
+premiumBearishAlert = newBearishOB and isPremiumStrength(alertBearishStrength)
+alertcondition(premiumBullishAlert, title="Premium Bullish OB (A+)", message="A+ Bullish Order Block detected!")
+alertcondition(premiumBearishAlert, title="Premium Bearish OB (A+)", message="A+ Bearish Order Block detected!")
+
+// Plot for alert message interpolation
+plot(newBullishOB ? alertBullishStrength : na, title="Bullish OB Strength", display=display.none)
+plot(newBearishOB ? alertBearishStrength : na, title="Bearish OB Strength", display=display.none)
+
+// =============================================================================
+// CODE INTEGRITY FOOTER
+// =============================================================================
+// @VantageLogics.ai SMC Methodology v1.1.0
+// @Non-Repainting | Institutional Grade | Silent Luxury Design
+// @Performance Optimized: var arrays, barstate.isconfirmed guards, object lifecycle management
+// @Brand Palette: Void Black (#050507) | Pure White (#FFFFFF) | Vantage Gold (#FCD34D)
+// @Features: OB Detection, Strength Grading, Mitigation Tracking, Multi-Timeframe Support
