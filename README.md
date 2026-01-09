@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.1.0-brightgreen)](CHANGELOG.md)
 
-**Institutional-grade Order Block detection with strength grading. Non-repainting SMC methodology.**
+**Institutional-Grade Trading System.**
 
 ---
 
